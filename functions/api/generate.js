@@ -44,6 +44,98 @@ function toPromptPreview(prompt) {
   return `${trimmed.slice(0, 80)}...`;
 }
 
+function normalizeStatus(status) {
+  if (status === "processing" || status === "completed" || status === "failed") {
+    return status;
+  }
+  return "completed";
+}
+
+function summarizeRecord(record) {
+  const status = normalizeStatus(record.status);
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    promptPreview: record.promptPreview || toPromptPreview(record.prompt || ""),
+    size: record.size,
+    quality: record.quality,
+    format: record.format,
+    status,
+    count:
+      typeof record.count === "number"
+        ? record.count
+        : typeof record.requestedCount === "number"
+          ? record.requestedCount
+          : Array.isArray(record.imageKeys)
+            ? record.imageKeys.length
+            : 0,
+    error: record.error || null
+  };
+}
+
+async function runGenerationJob({
+  s3,
+  recordKey,
+  baseRecord,
+  url,
+  azureApiKey,
+  azurePayload,
+  outputFormat,
+  mimeType
+}) {
+  const azureResponse = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-key": azureApiKey
+    },
+    body: JSON.stringify(azurePayload)
+  });
+
+  let data = {};
+  try {
+    data = await azureResponse.json();
+  } catch {
+    data = {};
+  }
+
+  if (!azureResponse.ok) {
+    throw new Error(data.error?.message || "Azure API 调用失败");
+  }
+
+  const rawImages = Array.isArray(data.data)
+    ? data.data
+        .map((item) => item?.b64_json)
+        .filter((img) => typeof img === "string" && img.length > 0)
+    : [];
+
+  if (!rawImages.length) {
+    throw new Error("Azure 返回里没有 b64_json 图片数据");
+  }
+
+  const dayPrefix = baseRecord.createdAt.slice(0, 10);
+  const imageKeys = new Array(rawImages.length);
+
+  await Promise.all(
+    rawImages.map(async (imageBase64, idx) => {
+      const imageKey = `images/${dayPrefix}/${baseRecord.id}_${idx + 1}.${outputFormat}`;
+      imageKeys[idx] = imageKey;
+      await s3.putBytes(imageKey, base64ToUint8Array(imageBase64), mimeType);
+    })
+  );
+
+  const completedRecord = {
+    ...baseRecord,
+    status: "completed",
+    completedAt: new Date().toISOString(),
+    count: imageKeys.length,
+    imageKeys,
+    error: null
+  };
+
+  await s3.putJson(recordKey, completedRecord);
+}
+
 export async function onRequestPost(context) {
   let requestBody;
   try {
@@ -96,82 +188,62 @@ export async function onRequestPost(context) {
   };
 
   try {
-    const azureResponse = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "api-key": AZURE_API_KEY
-      },
-      body: JSON.stringify(azurePayload)
-    });
-
-    let data = {};
-    try {
-      data = await azureResponse.json();
-    } catch {
-      data = {};
-    }
-
-    if (!azureResponse.ok) {
-      return jsonResponse(
-        { error: data.error?.message || "Azure API 调用失败" },
-        500
-      );
-    }
-
-    const rawImages = Array.isArray(data.data)
-      ? data.data
-          .map((item) => item?.b64_json)
-          .filter((img) => typeof img === "string" && img.length > 0)
-      : [];
-
-    if (!rawImages.length) {
-      return jsonResponse({ error: "Azure 返回里没有 b64_json 图片数据" }, 500);
-    }
-
     const createdAt = new Date().toISOString();
     const recordId = `${createdAt.replace(/[-:.TZ]/g, "")}_${crypto
       .randomUUID()
       .slice(0, 8)}`;
-    const dayPrefix = createdAt.slice(0, 10);
     const mimeType = getMimeType(outputFormat);
-    const imageKeys = new Array(rawImages.length);
-
-    await Promise.all(
-      rawImages.map(async (imageBase64, idx) => {
-        const imageKey = `images/${dayPrefix}/${recordId}_${idx + 1}.${outputFormat}`;
-        imageKeys[idx] = imageKey;
-        await s3.putBytes(imageKey, base64ToUint8Array(imageBase64), mimeType);
-      })
-    );
-
+    const recordKey = `records/${recordId}.json`;
     const record = {
       id: recordId,
       createdAt,
+      queuedAt: createdAt,
       prompt,
       promptPreview: toPromptPreview(prompt),
       size,
       quality,
       format: outputFormat,
-      count: imageKeys.length,
-      imageKeys
+      status: "processing",
+      requestedCount: n,
+      count: n,
+      imageKeys: [],
+      error: null
     };
 
-    await s3.putJson(`records/${recordId}.json`, record);
+    await s3.putJson(recordKey, record);
 
-    return jsonResponse({
-      ok: true,
-      recordId,
-      summary: {
-        id: record.id,
-        createdAt: record.createdAt,
-        promptPreview: record.promptPreview,
-        size: record.size,
-        quality: record.quality,
-        format: record.format,
-        count: record.count
+    const jobPromise = runGenerationJob({
+      s3,
+      recordKey,
+      baseRecord: record,
+      url,
+      azureApiKey: AZURE_API_KEY,
+      azurePayload,
+      outputFormat,
+      mimeType
+    }).catch(async (error) => {
+      const failedRecord = {
+        ...record,
+        status: "failed",
+        failedAt: new Date().toISOString(),
+        count: 0,
+        imageKeys: [],
+        error: error?.message || String(error)
+      };
+      try {
+        await s3.putJson(recordKey, failedRecord);
+      } catch {
+        // 标记失败本身也失败时，避免抛出未处理异常影响请求生命周期
       }
     });
+
+    if (typeof context.waitUntil === "function") {
+      context.waitUntil(jobPromise);
+    } else {
+      await jobPromise;
+    }
+
+    return jsonResponse({ ok: true, recordId, summary: summarizeRecord(record) });
   } catch (error) {
     return jsonResponse(
       { error: "服务器内部错误", details: error.message || String(error) },

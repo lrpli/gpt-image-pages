@@ -36,6 +36,10 @@
     .summary-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:6px; }
     .summary-title { font-size:13px; font-weight:600; max-width:75%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .summary-meta { font-size:12px; opacity:.8; }
+    .status-badge { font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid rgba(255,255,255,0.2); white-space:nowrap; }
+    .status-processing { color:#ffe1a8; border-color:rgba(255,225,168,0.45); background:rgba(255,225,168,0.12); }
+    .status-completed { color:#b7f7c1; border-color:rgba(183,247,193,0.45); background:rgba(183,247,193,0.12); }
+    .status-failed { color:#ffc0c0; border-color:rgba(255,192,192,0.45); background:rgba(255,192,192,0.14); }
     .detail-prompt { font-size:13px; margin-top:10px; white-space:pre-wrap; line-height:1.5; }
     .btn-ghost { padding:8px 12px; border-radius:999px; border:1px solid rgba(255,255,255,0.18); background:rgba(255,255,255,0.06); color:inherit; cursor:pointer; }
     .btn-ghost:hover { background:rgba(255,255,255,0.12); }
@@ -124,11 +128,19 @@
 </div>
 
 <script>
+  const POLL_FAST_MS = 2000;
+  const POLL_IDLE_MS = 6000;
+
   const state = {
     password: '',
     records: [],
-    selectedRecordId: null
+    selectedRecordId: null,
+    detailStatus: null,
+    inFlightSubmitCount: 0
   };
+
+  let historyPollTimer = null;
+  let historyPollInFlight = false;
 
   const loginCard = document.getElementById('login-card');
   const appGrid = document.getElementById('app-grid');
@@ -150,6 +162,81 @@
     return new Date(isoTime).toLocaleString();
   }
 
+  function normalizeStatus(status) {
+    if (status === 'processing' || status === 'completed' || status === 'failed') {
+      return status;
+    }
+    return 'completed';
+  }
+
+  function statusText(status) {
+    const normalized = normalizeStatus(status);
+    if (normalized === 'processing') return '正在生成';
+    if (normalized === 'failed') return '失败';
+    return '已完成';
+  }
+
+  function statusClass(status) {
+    const normalized = normalizeStatus(status);
+    if (normalized === 'processing') return 'status-processing';
+    if (normalized === 'failed') return 'status-failed';
+    return 'status-completed';
+  }
+
+  function toPromptPreview(prompt) {
+    const cleaned = String(prompt || '').trim().replace(/\s+/g, ' ');
+    if (cleaned.length <= 80) return cleaned;
+    return `${cleaned.slice(0, 80)}...`;
+  }
+
+  function updateGenButtonText() {
+    if (state.inFlightSubmitCount > 0) {
+      genBtn.textContent = `🚀 开始生成（提交中 ${state.inFlightSubmitCount}）`;
+      return;
+    }
+    genBtn.textContent = '🚀 开始生成';
+  }
+
+  function stopHistoryPolling() {
+    if (historyPollTimer) {
+      clearTimeout(historyPollTimer);
+      historyPollTimer = null;
+    }
+  }
+
+  function scheduleHistoryPolling(delayMs) {
+    stopHistoryPolling();
+    if (!state.password) return;
+    historyPollTimer = setTimeout(runHistoryPolling, delayMs);
+  }
+
+  async function runHistoryPolling() {
+    if (!state.password) return;
+    if (historyPollInFlight) {
+      scheduleHistoryPolling(POLL_FAST_MS);
+      return;
+    }
+
+    historyPollInFlight = true;
+    try {
+      await loadHistory({ showLoading: false });
+      if (state.selectedRecordId && state.detailStatus === 'processing') {
+        const selected = state.records.find((item) => item.id === state.selectedRecordId);
+        if (selected && normalizeStatus(selected.status) !== 'processing') {
+          await loadRecordDetail(state.selectedRecordId);
+        }
+      }
+    } catch {
+      // 轮询失败时保持静默，避免打断用户操作
+    } finally {
+      historyPollInFlight = false;
+      const hasProcessing = state.records.some(
+        (item) => normalizeStatus(item.status) === 'processing'
+      );
+      scheduleHistoryPolling(hasProcessing ? POLL_FAST_MS : POLL_IDLE_MS);
+    }
+  }
+
   function setLoggedIn(loggedIn) {
     loginCard.classList.toggle('hidden', loggedIn);
     appGrid.classList.toggle('hidden', !loggedIn);
@@ -157,6 +244,7 @@
   }
 
   function clearDetail(message) {
+    state.detailStatus = null;
     detailContent.classList.add('hidden');
     detailEmpty.classList.remove('hidden');
     detailEmpty.textContent = message;
@@ -200,6 +288,7 @@
     }
 
     state.records.forEach((record) => {
+      const status = normalizeStatus(record.status);
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'history-item summary-btn';
@@ -214,18 +303,26 @@
       title.className = 'summary-title';
       title.textContent = record.promptPreview || '(无 Prompt)';
 
-      const time = document.createElement('div');
-      time.className = 'muted';
-      time.textContent = formatTime(record.createdAt);
+      const badge = document.createElement('span');
+      badge.className = `status-badge ${statusClass(status)}`;
+      badge.textContent = statusText(status);
 
       const meta = document.createElement('div');
       meta.className = 'summary-meta';
-      meta.textContent = `${record.count || 0} 张 · ${record.size || '-'} · ${record.quality || '-'} · ${record.format || '-'}`;
+      meta.textContent = `${formatTime(record.createdAt)} · ${record.count || 0} 张 · ${record.size || '-'} · ${record.quality || '-'} · ${record.format || '-'}`;
 
       top.appendChild(title);
-      top.appendChild(time);
+      top.appendChild(badge);
       item.appendChild(top);
       item.appendChild(meta);
+
+      if (status === 'failed' && record.error) {
+        const errLine = document.createElement('div');
+        errLine.className = 'muted';
+        errLine.style.marginTop = '6px';
+        errLine.textContent = `失败原因: ${record.error}`;
+        item.appendChild(errLine);
+      }
 
       item.addEventListener('click', () => {
         loadRecordDetail(record.id);
@@ -236,12 +333,30 @@
   }
 
   function renderRecordDetail(record) {
+    const status = normalizeStatus(record.status);
+    state.detailStatus = status;
     detailEmpty.classList.add('hidden');
     detailContent.classList.remove('hidden');
 
-    detailMeta.textContent = `${formatTime(record.createdAt)} · ${record.count || 0} 张 · ${record.size || '-'} · ${record.quality || '-'} · ${record.format || '-'}`;
+    detailMeta.textContent = `${statusText(status)} · ${formatTime(record.createdAt)} · ${record.count || 0} 张 · ${record.size || '-'} · ${record.quality || '-'} · ${record.format || '-'}`;
     detailPrompt.textContent = record.prompt || '';
     detailGallery.innerHTML = '';
+
+    if (status === 'processing') {
+      const pending = document.createElement('div');
+      pending.className = 'muted';
+      pending.textContent = '任务正在后台生成，列表会自动刷新状态。';
+      detailGallery.appendChild(pending);
+      return;
+    }
+
+    if (status === 'failed') {
+      const failed = document.createElement('div');
+      failed.className = 'muted';
+      failed.textContent = `生成失败: ${record.error || '未知错误'}`;
+      detailGallery.appendChild(failed);
+      return;
+    }
 
     const images = Array.isArray(record.images) ? record.images : [];
     if (!images.length) {
@@ -283,8 +398,11 @@
     });
   }
 
-  async function loadHistory() {
-    historyContainer.innerHTML = '<div class="muted">加载中...</div>';
+  async function loadHistory(options = {}) {
+    const showLoading = options.showLoading !== false;
+    if (showLoading) {
+      historyContainer.innerHTML = '<div class="muted">加载中...</div>';
+    }
     try {
       const data = await apiRequest('/api/history?limit=50');
       state.records = Array.isArray(data.records) ? data.records : [];
@@ -322,6 +440,7 @@
 
   async function login(password) {
     state.password = password;
+    stopHistoryPolling();
     await apiRequest('/api/login', {
       method: 'POST',
       body: JSON.stringify({ password })
@@ -331,16 +450,22 @@
     loginMsg.textContent = '';
     setLoggedIn(true);
     clearDetail('点击右侧任一记录查看详细信息。');
+    scheduleHistoryPolling(POLL_FAST_MS);
+    updateGenButtonText();
   }
 
   function logout() {
+    stopHistoryPolling();
     state.password = '';
     state.records = [];
     state.selectedRecordId = null;
+    state.detailStatus = null;
+    state.inFlightSubmitCount = 0;
     sessionStorage.removeItem('ui_password');
     setLoggedIn(false);
     historyContainer.innerHTML = '';
     clearDetail('点击右侧任一记录查看详细信息。');
+    updateGenButtonText();
   }
 
   loginBtn.addEventListener('click', async () => {
@@ -371,6 +496,10 @@
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (!state.password) {
+      alert('请先登录再提交任务。');
+      return;
+    }
 
     const payload = {
       password: state.password,
@@ -380,31 +509,64 @@
       format: document.getElementById('format').value,
       n: parseInt(document.getElementById('n_images').value, 10)
     };
+    const optimisticId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const optimisticRecord = {
+      id: optimisticId,
+      createdAt: new Date().toISOString(),
+      promptPreview: toPromptPreview(payload.prompt),
+      size: payload.size,
+      quality: payload.quality,
+      format: payload.format,
+      status: 'processing',
+      count: payload.n,
+      error: null
+    };
+    state.records.unshift(optimisticRecord);
+    renderHistoryList();
 
-    genBtn.disabled = true;
-    genBtn.innerHTML = '<span class="spinner"></span> 生成并上传中...';
+    state.inFlightSubmitCount += 1;
+    updateGenButtonText();
 
     try {
       const data = await apiRequest('/api/generate', {
         method: 'POST',
         body: JSON.stringify(payload)
       });
-
-      await loadHistory();
-      if (data.recordId) {
-        await loadRecordDetail(data.recordId);
-      } else {
-        clearDetail('生成成功，但未返回记录 ID。');
+      const summary = data.summary || {};
+      const recordId = summary.id || data.recordId || optimisticId;
+      const mergedRecord = {
+        ...optimisticRecord,
+        ...summary,
+        id: recordId,
+        status: normalizeStatus(summary.status || 'processing'),
+        error: summary.error || null
+      };
+      const optimisticIndex = state.records.findIndex((item) => item.id === optimisticId);
+      if (optimisticIndex >= 0) {
+        state.records.splice(optimisticIndex, 1, mergedRecord);
       }
+      renderHistoryList();
+      scheduleHistoryPolling(600);
     } catch (err) {
-      alert(`生成失败: ${err.message}`);
+      const optimisticIndex = state.records.findIndex((item) => item.id === optimisticId);
+      if (optimisticIndex >= 0) {
+        state.records.splice(optimisticIndex, 1, {
+          ...optimisticRecord,
+          status: 'failed',
+          count: 0,
+          error: err.message
+        });
+        renderHistoryList();
+      }
+      alert(`提交生成任务失败: ${err.message}`);
     } finally {
-      genBtn.disabled = false;
-      genBtn.textContent = '🚀 开始生成';
+      state.inFlightSubmitCount = Math.max(0, state.inFlightSubmitCount - 1);
+      updateGenButtonText();
     }
   });
 
   (async function init() {
+    updateGenButtonText();
     clearDetail('点击右侧任一记录查看详细信息。');
     const savedPassword = sessionStorage.getItem('ui_password');
     if (!savedPassword) {

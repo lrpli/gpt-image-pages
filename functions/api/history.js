@@ -19,6 +19,35 @@ function promptPreview(prompt) {
   return `${cleaned.slice(0, 80)}...`;
 }
 
+function normalizeStatus(status) {
+  if (status === "processing" || status === "completed" || status === "failed") {
+    return status;
+  }
+  return "completed";
+}
+
+function summarizeRecord(record) {
+  const status = normalizeStatus(record.status);
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    promptPreview: record.promptPreview || promptPreview(record.prompt),
+    size: record.size,
+    quality: record.quality,
+    format: record.format,
+    status,
+    count:
+      typeof record.count === "number"
+        ? record.count
+        : typeof record.requestedCount === "number"
+          ? record.requestedCount
+          : Array.isArray(record.imageKeys)
+            ? record.imageKeys.length
+            : 0,
+    error: record.error || null
+  };
+}
+
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;
@@ -72,20 +101,14 @@ export async function onRequestGet(context) {
     if (!record) {
       return jsonResponse({ error: "记录不存在" }, 404);
     }
+    const status = normalizeStatus(record.status);
 
     if (!includeImages) {
       return jsonResponse({
         record: {
-          id: record.id,
-          createdAt: record.createdAt,
+          ...summarizeRecord(record),
           prompt: record.prompt,
-          promptPreview: record.promptPreview || promptPreview(record.prompt),
-          size: record.size,
-          quality: record.quality,
-          format: record.format,
-          count:
-            record.count ||
-            (Array.isArray(record.imageKeys) ? record.imageKeys.length : 0)
+          promptPreview: record.promptPreview || promptPreview(record.prompt)
         }
       });
     }
@@ -93,26 +116,23 @@ export async function onRequestGet(context) {
     const imageKeys = Array.isArray(record.imageKeys) ? record.imageKeys : [];
     const images = [];
 
-    for (const key of imageKeys) {
-      const buffer = await s3.getBytes(key);
-      if (!buffer) continue;
-      images.push({
-        key,
-        format: imageFormatFromKey(key, record.format),
-        b64: arrayBufferToBase64(buffer)
-      });
+    if (status === "completed") {
+      for (const key of imageKeys) {
+        const buffer = await s3.getBytes(key);
+        if (!buffer) continue;
+        images.push({
+          key,
+          format: imageFormatFromKey(key, record.format),
+          b64: arrayBufferToBase64(buffer)
+        });
+      }
     }
 
     return jsonResponse({
       record: {
-        id: record.id,
-        createdAt: record.createdAt,
+        ...summarizeRecord(record),
         prompt: record.prompt,
         promptPreview: record.promptPreview || promptPreview(record.prompt),
-        size: record.size,
-        quality: record.quality,
-        format: record.format,
-        count: record.count || images.length,
         images
       }
     });
@@ -133,18 +153,7 @@ export async function onRequestGet(context) {
   for (const key of listed.keys) {
     const record = await readRecord(s3, key);
     if (!record) continue;
-
-    records.push({
-      id: record.id,
-      createdAt: record.createdAt,
-      promptPreview: record.promptPreview || promptPreview(record.prompt),
-      size: record.size,
-      quality: record.quality,
-      format: record.format,
-      count:
-        record.count ||
-        (Array.isArray(record.imageKeys) ? record.imageKeys.length : 0)
-    });
+    records.push(summarizeRecord(record));
   }
 
   records.sort((a, b) => {
