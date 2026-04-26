@@ -285,9 +285,17 @@
 
   async function loadHistory() {
     historyContainer.innerHTML = '<div class="muted">加载中...</div>';
-    const data = await apiRequest('/api/history?limit=50');
-    state.records = Array.isArray(data.records) ? data.records : [];
-    renderHistoryList();
+    try {
+      const data = await apiRequest('/api/history?limit=50');
+      state.records = Array.isArray(data.records) ? data.records : [];
+      renderHistoryList();
+    } catch (err) {
+      if (String(err.message).includes('Unauthorized') || String(err.message).includes('访问口令错误')) {
+        logout();
+        loginMsg.textContent = '口令校验失败，请重新登录。';
+      }
+      throw err;
+    }
   }
 
   async function loadRecordDetail(recordId) {
@@ -303,6 +311,11 @@
       }
       renderRecordDetail(data.record);
     } catch (err) {
+      if (String(err.message).includes('Unauthorized') || String(err.message).includes('访问口令错误')) {
+        logout();
+        loginMsg.textContent = '口令校验失败，请重新登录。';
+        return;
+      }
       clearDetail(`加载详细信息失败: ${err.message}`);
     }
   }
@@ -313,11 +326,11 @@
       method: 'POST',
       body: JSON.stringify({ password })
     });
+    await loadHistory();
     sessionStorage.setItem('ui_password', password);
     loginMsg.textContent = '';
     setLoggedIn(true);
     clearDetail('点击右侧任一记录查看详细信息。');
-    await loadHistory();
   }
 
   function logout() {
@@ -344,7 +357,7 @@
     try {
       await login(password);
     } catch (err) {
-      state.password = '';
+      logout();
       loginMsg.textContent = `登录失败: ${err.message}`;
     } finally {
       loginBtn.disabled = false;
@@ -360,6 +373,7 @@
     e.preventDefault();
 
     const payload = {
+      password: state.password,
       prompt: document.getElementById('prompt').value,
       size: document.getElementById('size').value,
       quality: document.getElementById('quality').value,
