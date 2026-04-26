@@ -1,3 +1,5 @@
+import { createS3Client } from "./_s3.js";
+
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -34,11 +36,9 @@ function imageFormatFromKey(key, fallback) {
   return fallback || "png";
 }
 
-async function readRecord(bucket, key) {
-  const object = await bucket.get(key);
-  if (!object) return null;
+async function readRecord(s3, key) {
   try {
-    return await object.json();
+    return await s3.getJson(key);
   } catch {
     return null;
   }
@@ -55,16 +55,20 @@ export async function onRequestGet(context) {
     return jsonResponse({ error: "访问口令错误 (Unauthorized)" }, 401);
   }
 
-  const IMAGES_BUCKET = context.env.IMAGES_BUCKET;
-  if (!IMAGES_BUCKET || typeof IMAGES_BUCKET.list !== "function") {
-    return jsonResponse({ error: "缺少 R2 绑定：IMAGES_BUCKET" }, 500);
+  const s3Result = createS3Client(context.env);
+  if (!s3Result.ok) {
+    return jsonResponse(
+      { error: `缺少或错误的 S3 配置: ${s3Result.error}` },
+      500
+    );
   }
+  const s3 = s3Result.client;
 
   const id = (url.searchParams.get("id") || "").trim();
   const includeImages = url.searchParams.get("includeImages") === "1";
 
   if (id) {
-    const record = await readRecord(IMAGES_BUCKET, `records/${id}.json`);
+    const record = await readRecord(s3, `records/${id}.json`);
     if (!record) {
       return jsonResponse({ error: "记录不存在" }, 404);
     }
@@ -90,9 +94,8 @@ export async function onRequestGet(context) {
     const images = [];
 
     for (const key of imageKeys) {
-      const imageObject = await IMAGES_BUCKET.get(key);
-      if (!imageObject) continue;
-      const buffer = await imageObject.arrayBuffer();
+      const buffer = await s3.getBytes(key);
+      if (!buffer) continue;
       images.push({
         key,
         format: imageFormatFromKey(key, record.format),
@@ -116,11 +119,19 @@ export async function onRequestGet(context) {
   }
 
   const limit = clampInt(url.searchParams.get("limit"), 1, 100, 30);
-  const listed = await IMAGES_BUCKET.list({ prefix: "records/", limit });
+  let listed;
+  try {
+    listed = await s3.listKeys("records/", limit);
+  } catch (error) {
+    return jsonResponse(
+      { error: `读取历史列表失败: ${error.message || String(error)}` },
+      500
+    );
+  }
   const records = [];
 
-  for (const objectInfo of listed.objects) {
-    const record = await readRecord(IMAGES_BUCKET, objectInfo.key);
+  for (const key of listed.keys) {
+    const record = await readRecord(s3, key);
     if (!record) continue;
 
     records.push({

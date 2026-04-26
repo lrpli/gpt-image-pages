@@ -1,3 +1,5 @@
+import { createS3Client } from "./_s3.js";
+
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -62,7 +64,7 @@ export async function onRequestPost(context) {
   const AZURE_API_KEY = context.env.AZURE_API_KEY;
   const DEPLOYMENT = context.env.DEPLOYMENT || "gpt-image-2";
   const API_VERSION = context.env.API_VERSION || "2024-02-01";
-  const IMAGES_BUCKET = context.env.IMAGES_BUCKET;
+  const s3Result = createS3Client(context.env);
 
   if (password !== UI_PASSWORD) {
     return jsonResponse({ error: "访问口令错误 (Unauthorized)" }, 401);
@@ -76,9 +78,13 @@ export async function onRequestPost(context) {
     return jsonResponse({ error: "缺少 Azure 配置（AZURE_ENDPOINT/AZURE_API_KEY）" }, 500);
   }
 
-  if (!IMAGES_BUCKET || typeof IMAGES_BUCKET.put !== "function") {
-    return jsonResponse({ error: "缺少 R2 绑定：IMAGES_BUCKET" }, 500);
+  if (!s3Result.ok) {
+    return jsonResponse(
+      { error: `缺少或错误的 S3 配置: ${s3Result.error}` },
+      500
+    );
   }
+  const s3 = s3Result.client;
 
   const url = `${AZURE_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${DEPLOYMENT}/images/generations?api-version=${API_VERSION}`;
   const azurePayload = {
@@ -135,9 +141,7 @@ export async function onRequestPost(context) {
       rawImages.map(async (imageBase64, idx) => {
         const imageKey = `images/${dayPrefix}/${recordId}_${idx + 1}.${outputFormat}`;
         imageKeys[idx] = imageKey;
-        await IMAGES_BUCKET.put(imageKey, base64ToUint8Array(imageBase64), {
-          httpMetadata: { contentType: mimeType }
-        });
+        await s3.putBytes(imageKey, base64ToUint8Array(imageBase64), mimeType);
       })
     );
 
@@ -153,9 +157,7 @@ export async function onRequestPost(context) {
       imageKeys
     };
 
-    await IMAGES_BUCKET.put(`records/${recordId}.json`, JSON.stringify(record), {
-      httpMetadata: { contentType: "application/json" }
-    });
+    await s3.putJson(`records/${recordId}.json`, record);
 
     return jsonResponse({
       ok: true,
