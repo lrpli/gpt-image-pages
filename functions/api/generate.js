@@ -31,7 +31,6 @@ export async function onRequestPost(context) {
     size: size,
     quality: quality,
     output_format: outputFormat,
-    response_format: "b64_json", // 强制要求返回 Base64
     n: n || 1
   };
 
@@ -55,8 +54,19 @@ export async function onRequestPost(context) {
       });
     }
 
-    // 5. 提取 Base64 编码的图片
-    const images = data.data.map(item => item.b64_json);
+    // 5. 提取 Base64 编码的图片（部分接口默认就是 b64_json）
+    const images = Array.isArray(data.data)
+      ? data.data
+          .map((item) => item?.b64_json)
+          .filter((img) => typeof img === "string" && img.length > 0)
+      : [];
+
+    if (!images.length) {
+      return new Response(JSON.stringify({ error: "Azure 返回里没有 b64_json 图片数据" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
 
     return new Response(JSON.stringify({ images: images }), {
       status: 200,
