@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>gpt-image-2 生成器 (Cloudflare版)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 0; background: #0b1020; color: #e8ecff; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 22px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:14px; }
+    .brand { font-weight:700; letter-spacing:.2px; }
+    .grid { display:grid; grid-template-columns: 1.2fr .8fr; gap:14px; }
+    .card { background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.10); border-radius:16px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,0.25); }
+    h1 { font-size:18px; margin:0 0 10px; }
+    label { display:block; font-size:12px; opacity:.9; margin:10px 0 6px; }
+    textarea, select, input[type=text], input[type=number], input[type=password] { width:100%; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,0.14); background:rgba(0,0,0,0.25); color:inherit; font-size:14px; }
+    textarea { min-height:140px; resize:vertical; }
+    .row2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
+    .btn { margin-top:12px; display:inline-flex; gap:8px; align-items:center; padding:10px 18px; border-radius:999px; border:1px solid rgba(255,255,255,0.18); background:rgba(90,120,255,0.30); cursor:pointer; color:inherit; font-size:14px; width: 100%; justify-content: center;}
+    .btn:hover:not(:disabled) { background:rgba(90,120,255,0.45); }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .gallery { margin-top:12px; display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+    .imgcard { border-radius:14px; overflow:hidden; border:1px solid rgba(255,255,255,0.10); background:rgba(0,0,0,0.2); }
+    .imgcard img { width:100%; height:auto; display:block; }
+    .imgmeta { padding:8px 12px; font-size:12px; display:flex; justify-content:space-between; gap:8px; }
+    .muted { opacity:.75; font-size:12px; line-height:1.5; }
+    .history-item { padding:10px; border-radius:12px; border:1px solid rgba(255,255,255,0.10); background:rgba(0,0,0,0.18); margin-bottom:10px; }
+    .spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,0.2); border-top-color:#7fa7ff; border-radius:50%; animation:spin .7s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    @media(max-width:720px) { .grid { grid-template-columns:1fr; } .row3 { grid-template-columns:1fr 1fr; } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">🖼️ gpt-image-2 Serverless 生成器</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h1>生成设置</h1>
+      <form id="gen-form">
+        <label>密码 (访问口令)</label>
+        <input type="password" id="ui_password" placeholder="输入访问口令" required />
+
+        <label style="margin-top:12px;">Prompt</label>
+        <textarea id="prompt" placeholder="Describe the image..." required>A photograph of a red fox in an autumn forest</textarea>
+
+        <div class="row3">
+          <div>
+            <label>Size</label>
+            <select id="size">
+              <option value="1024x1024">1024x1024</option>
+              <option value="1024x1536">1024x1536</option>
+              <option value="1536x1024">1536x1024</option>
+            </select>
+          </div>
+          <div>
+            <label>Quality</label>
+            <select id="quality">
+              <option value="low">low</option>
+              <option value="medium" selected>medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+          <div>
+            <label>Format</label>
+            <select id="format">
+              <option value="png">png</option>
+              <option value="jpeg">jpeg</option>
+              <option value="webp">webp</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row2">
+          <div>
+            <label>n（张数 1-8）</label>
+            <input id="n_images" type="number" min="1" max="8" value="1">
+          </div>
+        </div>
+
+        <button class="btn" id="gen-btn" type="submit">🚀 开始生成</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h1>生成结果与历史</h1>
+      <div class="muted">历史记录保存在本地浏览器中</div>
+      <div id="history-container" style="margin-top: 12px;"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const form = document.getElementById('gen-form');
+  const btn = document.getElementById('gen-btn');
+  const historyContainer = document.getElementById('history-container');
+
+  // 初始化加载本地历史记录
+  function loadHistory() {
+    const history = JSON.parse(localStorage.getItem('img_history') || '[]');
+    historyContainer.innerHTML = '';
+    history.forEach(item => {
+      const safeFormat = ['png', 'jpeg', 'webp'].includes(item.format) ? item.format : 'png';
+      const imgHtml = item.images.map((b64, idx) => `
+        <div class="imgcard">
+          <img src="data:image/${safeFormat};base64,${b64}" alt="generated"/>
+          <div class="imgmeta">
+            <span>Result ${idx + 1}</span>
+            <a href="data:image/${safeFormat};base64,${b64}" download="image_${Date.now()}_${idx}.${safeFormat}" style="color:#bcd0ff">下载</a>
+          </div>
+        </div>
+      `).join('');
+
+      historyContainer.innerHTML += `
+        <div class="history-item">
+          <div class="muted">${new Date(item.time).toLocaleString()}</div>
+          <div style="font-size: 12px; margin: 8px 0;"><strong>Prompt:</strong> ${item.prompt}</div>
+          <div class="gallery">${imgHtml}</div>
+        </div>
+      `;
+    });
+  }
+  loadHistory();
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> 生成中，请稍候...';
+
+    const payload = {
+      password: document.getElementById('ui_password').value,
+      prompt: document.getElementById('prompt').value,
+      size: document.getElementById('size').value,
+      quality: document.getElementById('quality').value,
+      format: document.getElementById('format').value,
+      n: parseInt(document.getElementById('n_images').value)
+    };
+
+    try {
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      const data = await res.json();
+      
+      if (!res.ok || data.error) {
+        alert("生成失败: " + (data.error || "未知错误"));
+      } else {
+        // 保存到本地历史
+        const history = JSON.parse(localStorage.getItem('img_history') || '[]');
+        history.unshift({
+          time: new Date().toISOString(),
+          prompt: payload.prompt,
+          format: payload.format,
+          images: data.images
+        });
+        if(history.length > 20) history.pop(); // 仅保留20条
+        localStorage.setItem('img_history', JSON.stringify(history));
+        loadHistory();
+      }
+    } catch (err) {
+      alert("网络错误: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '🚀 开始生成';
+    }
+  });
+</script>
+</body>
+</html>
