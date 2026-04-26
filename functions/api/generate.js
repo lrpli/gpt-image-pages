@@ -1,41 +1,95 @@
-export async function onRequestPost(context) {
-  // 从请求体中解析参数
-  const requestBody = await context.request.json();
-  const { password, prompt, size, quality, format, n } = requestBody;
-  const normalizedFormat = String(format || "png").toLowerCase();
-  const outputFormat = ["png", "jpeg", "webp"].includes(normalizedFormat)
-    ? normalizedFormat
-    : "png";
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
 
-  // 从 Cloudflare Pages 的环境变量中读取机密信息
+function clampInt(value, min, max, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function getPassword(request, requestBody) {
+  return request.headers.get("x-ui-password") || requestBody.password || "";
+}
+
+function getOutputFormat(format) {
+  const normalized = String(format || "png").toLowerCase();
+  return ["png", "jpeg", "webp"].includes(normalized) ? normalized : "png";
+}
+
+function getMimeType(format) {
+  if (format === "jpeg") return "image/jpeg";
+  if (format === "webp") return "image/webp";
+  return "image/png";
+}
+
+function base64ToUint8Array(base64String) {
+  const clean = base64String.replace(/\s/g, "");
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function toPromptPreview(prompt) {
+  const trimmed = prompt.trim().replace(/\s+/g, " ");
+  if (trimmed.length <= 80) return trimmed;
+  return `${trimmed.slice(0, 80)}...`;
+}
+
+export async function onRequestPost(context) {
+  let requestBody;
+  try {
+    requestBody = await context.request.json();
+  } catch {
+    return jsonResponse({ error: "请求体必须是合法 JSON" }, 400);
+  }
+
+  const password = getPassword(context.request, requestBody);
+  const prompt = String(requestBody.prompt || "").trim();
+  const size = String(requestBody.size || "1024x1024");
+  const quality = String(requestBody.quality || "medium");
+  const outputFormat = getOutputFormat(requestBody.format);
+  const n = clampInt(requestBody.n, 1, 8, 1);
+
   const UI_PASSWORD = context.env.UI_PASSWORD;
-  const AZURE_ENDPOINT = context.env.AZURE_ENDPOINT; 
+  const AZURE_ENDPOINT = context.env.AZURE_ENDPOINT;
   const AZURE_API_KEY = context.env.AZURE_API_KEY;
   const DEPLOYMENT = context.env.DEPLOYMENT || "gpt-image-2";
   const API_VERSION = context.env.API_VERSION || "2024-02-01";
+  const IMAGES_BUCKET = context.env.IMAGES_BUCKET;
 
-  // 1. 验证访问口令
   if (password !== UI_PASSWORD) {
-    return new Response(JSON.stringify({ error: "访问口令错误 (Unauthorized)" }), { 
-      status: 401,
-      headers: { "Content-Type": "application/json" }
-    });
+    return jsonResponse({ error: "访问口令错误 (Unauthorized)" }, 401);
   }
 
-  // 2. 构建 Azure 调用的 URL
-  const url = `${AZURE_ENDPOINT.replace(/\/$/, '')}/openai/deployments/${DEPLOYMENT}/images/generations?api-version=${API_VERSION}`;
+  if (!prompt) {
+    return jsonResponse({ error: "prompt 不能为空" }, 400);
+  }
 
-  // 3. 构建发送给 Azure 的请求参数
+  if (!AZURE_ENDPOINT || !AZURE_API_KEY) {
+    return jsonResponse({ error: "缺少 Azure 配置（AZURE_ENDPOINT/AZURE_API_KEY）" }, 500);
+  }
+
+  if (!IMAGES_BUCKET || typeof IMAGES_BUCKET.put !== "function") {
+    return jsonResponse({ error: "缺少 R2 绑定：IMAGES_BUCKET" }, 500);
+  }
+
+  const url = `${AZURE_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${DEPLOYMENT}/images/generations?api-version=${API_VERSION}`;
   const azurePayload = {
-    prompt: prompt,
-    size: size,
-    quality: quality,
+    prompt,
+    size,
+    quality,
     output_format: outputFormat,
-    n: n || 1
+    n
   };
 
   try {
-    // 4. 调用 Azure OpenAI API (原 PHP 使用 curl，这里使用原生的 fetch)
     const azureResponse = await fetch(url, {
       method: "POST",
       headers: {
@@ -45,38 +99,81 @@ export async function onRequestPost(context) {
       body: JSON.stringify(azurePayload)
     });
 
-    const data = await azureResponse.json();
-
-    if (!azureResponse.ok) {
-      return new Response(JSON.stringify({ error: data.error?.message || "Azure API 调用失败" }), { 
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
+    let data = {};
+    try {
+      data = await azureResponse.json();
+    } catch {
+      data = {};
     }
 
-    // 5. 提取 Base64 编码的图片（部分接口默认就是 b64_json）
-    const images = Array.isArray(data.data)
+    if (!azureResponse.ok) {
+      return jsonResponse(
+        { error: data.error?.message || "Azure API 调用失败" },
+        500
+      );
+    }
+
+    const rawImages = Array.isArray(data.data)
       ? data.data
           .map((item) => item?.b64_json)
           .filter((img) => typeof img === "string" && img.length > 0)
       : [];
 
-    if (!images.length) {
-      return new Response(JSON.stringify({ error: "Azure 返回里没有 b64_json 图片数据" }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
+    if (!rawImages.length) {
+      return jsonResponse({ error: "Azure 返回里没有 b64_json 图片数据" }, 500);
     }
 
-    return new Response(JSON.stringify({ images: images }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" }
+    const createdAt = new Date().toISOString();
+    const recordId = `${createdAt.replace(/[-:.TZ]/g, "")}_${crypto
+      .randomUUID()
+      .slice(0, 8)}`;
+    const dayPrefix = createdAt.slice(0, 10);
+    const mimeType = getMimeType(outputFormat);
+    const imageKeys = new Array(rawImages.length);
+
+    await Promise.all(
+      rawImages.map(async (imageBase64, idx) => {
+        const imageKey = `images/${dayPrefix}/${recordId}_${idx + 1}.${outputFormat}`;
+        imageKeys[idx] = imageKey;
+        await IMAGES_BUCKET.put(imageKey, base64ToUint8Array(imageBase64), {
+          httpMetadata: { contentType: mimeType }
+        });
+      })
+    );
+
+    const record = {
+      id: recordId,
+      createdAt,
+      prompt,
+      promptPreview: toPromptPreview(prompt),
+      size,
+      quality,
+      format: outputFormat,
+      count: imageKeys.length,
+      imageKeys
+    };
+
+    await IMAGES_BUCKET.put(`records/${recordId}.json`, JSON.stringify(record), {
+      httpMetadata: { contentType: "application/json" }
     });
 
-  } catch (error) {
-    return new Response(JSON.stringify({ error: "服务器内部错误", details: error.message }), { 
-      status: 500,
-      headers: { "Content-Type": "application/json" }
+    return jsonResponse({
+      ok: true,
+      recordId,
+      summary: {
+        id: record.id,
+        createdAt: record.createdAt,
+        promptPreview: record.promptPreview,
+        size: record.size,
+        quality: record.quality,
+        format: record.format,
+        count: record.count
+      }
     });
+  } catch (error) {
+    return jsonResponse(
+      { error: "服务器内部错误", details: error.message || String(error) },
+      500
+    );
   }
 }
