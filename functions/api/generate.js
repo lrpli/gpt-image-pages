@@ -134,6 +134,7 @@ async function runGenerationJob({
   };
 
   await s3.putJson(recordKey, completedRecord);
+  return completedRecord;
 }
 
 export async function onRequestPost(context) {
@@ -186,6 +187,8 @@ export async function onRequestPost(context) {
     output_format: outputFormat,
     n
   };
+  let persistedRecord = null;
+  let persistedRecordKey = null;
 
   try {
     const createdAt = new Date().toISOString();
@@ -209,10 +212,12 @@ export async function onRequestPost(context) {
       imageKeys: [],
       error: null
     };
+    persistedRecord = record;
+    persistedRecordKey = recordKey;
 
     await s3.putJson(recordKey, record);
 
-    const jobPromise = runGenerationJob({
+    const completedRecord = await runGenerationJob({
       s3,
       recordKey,
       baseRecord: record,
@@ -221,30 +226,30 @@ export async function onRequestPost(context) {
       azurePayload,
       outputFormat,
       mimeType
-    }).catch(async (error) => {
-      const failedRecord = {
-        ...record,
-        status: "failed",
-        failedAt: new Date().toISOString(),
-        count: 0,
-        imageKeys: [],
-        error: error?.message || String(error)
-      };
-      try {
-        await s3.putJson(recordKey, failedRecord);
-      } catch {
-        // 标记失败本身也失败时，避免抛出未处理异常影响请求生命周期
-      }
     });
 
-    if (typeof context.waitUntil === "function") {
-      context.waitUntil(jobPromise);
-    } else {
-      await jobPromise;
-    }
-
-    return jsonResponse({ ok: true, recordId, summary: summarizeRecord(record) });
+    return jsonResponse({
+      ok: true,
+      recordId,
+      summary: summarizeRecord(completedRecord)
+    });
   } catch (error) {
+    // 若任务已入队(写了processing记录)但后续失败，尽量回写失败状态，避免长时间停在processing
+    try {
+      if (persistedRecord && persistedRecordKey) {
+        const failedRecord = {
+          ...persistedRecord,
+          status: "failed",
+          failedAt: new Date().toISOString(),
+          count: 0,
+          imageKeys: [],
+          error: error?.message || String(error)
+        };
+        await s3.putJson(persistedRecordKey, failedRecord);
+      }
+    } catch {
+      // 忽略二次写失败，优先返回原始错误
+    }
     return jsonResponse(
       { error: "服务器内部错误", details: error.message || String(error) },
       500
