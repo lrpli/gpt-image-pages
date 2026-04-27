@@ -40,6 +40,33 @@ function toPromptPreview(prompt) {
   return `${trimmed.slice(0, 80)}...`;
 }
 
+function uniqueStrings(values) {
+  const result = [];
+  const seen = new Set();
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function buildEditCandidates(endpoint, deployments, apiVersions) {
+  const base = endpoint.replace(/\/$/, "");
+  const candidates = [];
+  for (const deployment of deployments) {
+    for (const apiVersion of apiVersions) {
+      candidates.push({
+        deployment,
+        apiVersion,
+        url: `${base}/openai/deployments/${deployment}/images/edits?api-version=${encodeURIComponent(apiVersion)}`
+      });
+    }
+  }
+  return candidates;
+}
+
 export async function onRequestPost(context) {
   const password = context.request.headers.get("x-ui-password") || "";
 
@@ -47,7 +74,9 @@ export async function onRequestPost(context) {
   const AZURE_ENDPOINT = context.env.AZURE_ENDPOINT;
   const AZURE_API_KEY = context.env.AZURE_API_KEY;
   const DEPLOYMENT = context.env.DEPLOYMENT || "gpt-image-2";
+  const EDIT_DEPLOYMENT = context.env.EDIT_DEPLOYMENT || DEPLOYMENT;
   const API_VERSION = context.env.API_VERSION || "2024-02-01";
+  const EDIT_API_VERSION = context.env.EDIT_API_VERSION || API_VERSION;
 
   if (password !== UI_PASSWORD) {
     return jsonResponse({ error: "访问口令错误 (Unauthorized)" }, 401);
@@ -81,30 +110,79 @@ export async function onRequestPost(context) {
   if (!prompt) return jsonResponse({ error: "prompt 不能为空" }, 400);
   if (!imageFile) return jsonResponse({ error: "image 文件不能为空" }, 400);
 
-  // 转发给 Azure /images/edits（multipart）
-  const azureForm = new FormData();
-  azureForm.append("prompt", prompt);
-  azureForm.append("size", size);
-  azureForm.append("quality", quality);
-  azureForm.append("output_format", outputFormat);
-  azureForm.append("n", String(n));
-  azureForm.append("image", imageFile);
-  if (maskFile) azureForm.append("mask", maskFile);
+  function createAzureForm() {
+    const azureForm = new FormData();
+    azureForm.append("prompt", prompt);
+    azureForm.append("size", size);
+    azureForm.append("quality", quality);
+    azureForm.append("output_format", outputFormat);
+    azureForm.append("n", String(n));
+    azureForm.append("image", imageFile);
+    if (maskFile) azureForm.append("mask", maskFile);
+    return azureForm;
+  }
 
-  const url = `${AZURE_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${DEPLOYMENT}/images/edits?api-version=${API_VERSION}`;
+  const deploymentCandidates = uniqueStrings([EDIT_DEPLOYMENT, DEPLOYMENT]);
+  const versionCandidates = uniqueStrings([EDIT_API_VERSION, API_VERSION, "2025-04-01-preview"]);
+  const azureCandidates = buildEditCandidates(AZURE_ENDPOINT, deploymentCandidates, versionCandidates);
 
   try {
-    const azureResponse = await fetch(url, {
-      method: "POST",
-      headers: { "api-key": AZURE_API_KEY },
-      body: azureForm
-    });
+    let data = null;
+    let lastErrorMessage = "";
+    let triedAnyCandidate = false;
 
-    let data = {};
-    try { data = await azureResponse.json(); } catch { data = {}; }
+    for (const candidate of azureCandidates) {
+      triedAnyCandidate = true;
 
-    if (!azureResponse.ok) {
-      return jsonResponse({ error: data.error?.message || "Azure API 调用失败" }, 500);
+      const azureResponse = await fetch(candidate.url, {
+        method: "POST",
+        headers: { "api-key": AZURE_API_KEY },
+        body: createAzureForm()
+      });
+
+      let responseData = {};
+      try {
+        responseData = await azureResponse.json();
+      } catch {
+        responseData = {};
+      }
+
+      if (azureResponse.ok) {
+        data = responseData;
+        break;
+      }
+
+      const message = String(responseData.error?.message || "").trim();
+      lastErrorMessage =
+        message ||
+        `Azure API 调用失败 (${azureResponse.status}) [deployment=${candidate.deployment}, apiVersion=${candidate.apiVersion}]`;
+
+      const isResourceNotFound =
+        azureResponse.status === 404 || /resource not found/i.test(message);
+
+      if (!isResourceNotFound) {
+        return jsonResponse({ error: lastErrorMessage }, 500);
+      }
+    }
+
+    if (!data) {
+      if (!triedAnyCandidate) {
+        return jsonResponse({ error: "缺少可用的编辑请求候选配置" }, 500);
+      }
+
+      const triedList = azureCandidates
+        .map((item) => `${item.deployment}@${item.apiVersion}`)
+        .join(", ");
+      const fallbackMessage = lastErrorMessage || "Resource not found";
+      return jsonResponse(
+        {
+          error:
+            `${fallbackMessage}。` +
+            `已尝试: ${triedList}。` +
+            "请检查 EDIT_DEPLOYMENT / DEPLOYMENT 与 EDIT_API_VERSION / API_VERSION 是否正确，且当前部署支持 images/edits。"
+        },
+        500
+      );
     }
 
     const rawImages = Array.isArray(data.data)
