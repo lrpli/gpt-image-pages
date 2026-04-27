@@ -545,7 +545,12 @@
       if (optimisticIndex >= 0) {
         state.records.splice(optimisticIndex, 1, mergedRecord);
       }
+      // 更新 selectedRecordId：旧的乐观 ID 已被替换为真实 ID，轮询需要用真实 ID 才能自动刷新详情
+      if (state.selectedRecordId === optimisticId) {
+        state.selectedRecordId = recordId;
+      }
       renderHistoryList();
+      await loadRecordDetail(recordId);
       scheduleHistoryPolling(600);
     } catch (err) {
       const optimisticIndex = state.records.findIndex((item) => item.id === optimisticId);
