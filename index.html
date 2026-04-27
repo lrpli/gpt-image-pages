@@ -5,44 +5,66 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>gpt-image-2 生成器 (Cloudflare版) 1</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      --bg: #f5f7f2;
+      --surface: #ffffff;
+      --surface2: #f0f4ed;
+      --border: #dde8d8;
+      --text: #2d3b28;
+      --text-muted: #7a8f74;
+      --accent: #5a8a5a;
+      --accent-hover: #4a7a4a;
+      --accent-light: rgba(90,138,90,0.10);
+      --radius: 14px;
+      --shadow: 0 2px 12px rgba(60,90,50,0.07);
+    }
     * { box-sizing: border-box; }
-    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 0; background: #0b1020; color: #e8ecff; }
-    .wrap { max-width: 1200px; margin: 0 auto; padding: 22px; }
-    .topbar { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:14px; }
-    .brand { font-weight:700; letter-spacing:.2px; }
-    .grid { display:grid; grid-template-columns: 1.5fr 1fr; gap:14px; }
-    .card { background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.10); border-radius:16px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,0.25); }
-    h1 { font-size:18px; margin:0 0 10px; }
-    label { display:block; font-size:12px; opacity:.9; margin:10px 0 6px; }
-    textarea, select, input[type=text], input[type=number], input[type=password] { width:100%; padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,0.14); background:rgba(0,0,0,0.25); color:inherit; font-size:14px; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 0; background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:18px; }
+    .brand { font-weight:700; font-size:15px; letter-spacing:.2px; color: var(--accent); }
+    .grid { display:grid; grid-template-columns: 1.5fr 1fr; gap:16px; }
+    .card { background: var(--surface); border:1px solid var(--border); border-radius: var(--radius); padding:20px; box-shadow: var(--shadow); }
+    h1 { font-size:15px; font-weight:600; margin:0 0 12px; color: var(--text); letter-spacing:.1px; }
+    label { display:block; font-size:12px; color: var(--text-muted); margin:10px 0 5px; }
+    textarea, select, input[type=text], input[type=number], input[type=password] {
+      width:100%; padding:9px 12px; border-radius:10px;
+      border:1px solid var(--border); background: var(--surface2);
+      color: var(--text); font-size:14px; outline:none;
+      transition: border-color .15s;
+    }
+    textarea:focus, select:focus, input:focus { border-color: var(--accent); }
     textarea { min-height:140px; resize:vertical; }
     .row2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
     .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; }
-    .btn { margin-top:12px; display:inline-flex; gap:8px; align-items:center; padding:10px 18px; border-radius:999px; border:1px solid rgba(255,255,255,0.18); background:rgba(90,120,255,0.30); cursor:pointer; color:inherit; font-size:14px; width: 100%; justify-content: center;}
-    .btn:hover:not(:disabled) { background:rgba(90,120,255,0.45); }
+    .btn { margin-top:14px; display:inline-flex; gap:8px; align-items:center; padding:10px 18px;
+      border-radius:999px; border:none; background: var(--accent);
+      cursor:pointer; color:#fff; font-size:14px; font-weight:500;
+      width:100%; justify-content:center; transition: background .15s; }
+    .btn:hover:not(:disabled) { background: var(--accent-hover); }
     .btn:disabled { opacity:.5; cursor:not-allowed; }
-    .gallery { margin-top:12px; display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
-    .imgcard { border-radius:14px; overflow:hidden; border:1px solid rgba(255,255,255,0.10); background:rgba(0,0,0,0.2); }
-    .imgcard img { width:100%; height:auto; display:block; }
-    .imgmeta { padding:8px 12px; font-size:12px; display:flex; justify-content:space-between; gap:8px; }
-    .muted { opacity:.75; font-size:12px; line-height:1.5; }
-    .history-item { padding:10px; border-radius:12px; border:1px solid rgba(255,255,255,0.10); background:rgba(0,0,0,0.18); margin-bottom:10px; }
-    .spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,0.2); border-top-color:#7fa7ff; border-radius:50%; animation:spin .7s linear infinite; }
+    .gallery { margin-top:14px; display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+    .imgcard { border-radius:12px; overflow:hidden; border:1px solid var(--border); background: var(--surface2); }
+    .imgcard img { width:100%; height:auto; max-height:320px; object-fit:contain; display:block; }
+    .imgmeta { padding:8px 12px; font-size:12px; display:flex; justify-content:space-between; gap:8px; color: var(--text-muted); }
+    .muted { color: var(--text-muted); font-size:12px; line-height:1.6; }
+    .history-item { padding:11px 12px; border-radius:10px; border:1px solid var(--border); background: var(--surface2); margin-bottom:8px; transition: border-color .15s, background .15s; }
+    .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--border); border-top-color: var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
     .hidden { display:none !important; }
-    .split { display:grid; gap:14px; }
+    .split { display:grid; gap:16px; }
     .summary-btn { width:100%; text-align:left; color:inherit; cursor:pointer; }
-    .summary-btn.active { border-color:rgba(127,167,255,0.5); background:rgba(127,167,255,0.12); }
-    .summary-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:6px; }
+    .summary-btn.active { border-color: var(--accent); background: var(--accent-light); }
+    .summary-btn:hover:not(.active) { border-color:#b8d0b2; background:#f8fbf6; }
+    .summary-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:5px; }
     .summary-title { font-size:13px; font-weight:600; max-width:75%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .summary-meta { font-size:12px; opacity:.8; }
-    .status-badge { font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid rgba(255,255,255,0.2); white-space:nowrap; }
-    .status-processing { color:#ffe1a8; border-color:rgba(255,225,168,0.45); background:rgba(255,225,168,0.12); }
-    .status-completed { color:#b7f7c1; border-color:rgba(183,247,193,0.45); background:rgba(183,247,193,0.12); }
-    .status-failed { color:#ffc0c0; border-color:rgba(255,192,192,0.45); background:rgba(255,192,192,0.14); }
-    .detail-prompt { font-size:13px; margin-top:10px; white-space:pre-wrap; line-height:1.5; }
-    .btn-ghost { padding:8px 12px; border-radius:999px; border:1px solid rgba(255,255,255,0.18); background:rgba(255,255,255,0.06); color:inherit; cursor:pointer; }
-    .btn-ghost:hover { background:rgba(255,255,255,0.12); }
+    .summary-meta { font-size:11px; color: var(--text-muted); }
+    .status-badge { font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid; white-space:nowrap; }
+    .status-processing { color:#8a6d00; border-color:#e8d080; background:#fdf8dc; }
+    .status-completed { color:#2d7a3a; border-color:#a8dcb0; background:#eef8f0; }
+    .status-failed { color:#a03030; border-color:#e8aaaa; background:#fdf0f0; }
+    .detail-prompt { font-size:13px; margin-top:10px; white-space:pre-wrap; line-height:1.6; color: var(--text); }
+    .btn-ghost { padding:8px 14px; border-radius:999px; border:1px solid var(--border); background: var(--surface2); color: var(--text-muted); cursor:pointer; font-size:13px; transition: background .15s; }
+    .btn-ghost:hover { background: var(--border); }
     @keyframes spin { to { transform:rotate(360deg); } }
     @media(max-width:720px) { .grid { grid-template-columns:1fr; } .row3 { grid-template-columns:1fr 1fr; } }
   </style>
@@ -50,7 +72,7 @@
 <body>
 <div class="wrap">
   <div class="topbar">
-    <div class="brand">🖼️ gpt-image-2 Serverless 生成器</div>
+    <div class="brand">🌿 gpt-image-2 生成器</div>
     <button id="logout-btn" class="btn-ghost hidden" type="button">退出登录</button>
   </div>
 
