@@ -67,6 +67,10 @@
     .detail-prompt { font-size:13px; margin-top:10px; white-space:pre-wrap; line-height:1.6; color: var(--text); }
     .btn-ghost { padding:8px 14px; border-radius:999px; border:1px solid var(--border); background: var(--surface2); color: var(--text-muted); cursor:pointer; font-size:13px; transition: background .15s; }
     .btn-ghost:hover { background: var(--border); }
+    .mode-tab { padding:7px 16px; border-radius:999px; border:1px solid var(--border); background:var(--surface2); color:var(--text-muted); cursor:pointer; font-size:13px; transition: all .15s; }
+    .mode-tab-active { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .mode-tab:hover:not(.mode-tab-active) { border-color:#b8d0b2; background:#f0f7ee; }
+    input[type=file] { width:100%; padding:6px 10px; border-radius:10px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:13px; cursor:pointer; }
     @keyframes spin { to { transform:rotate(360deg); } }
     @media(max-width:720px) { .grid { grid-template-columns:1fr; } .row3 { grid-template-columns:1fr 1fr; } }
   </style>
@@ -89,9 +93,22 @@
   <div class="grid hidden" id="app-grid">
     <div class="card">
       <h1>生成设置</h1>
+
+      <div style="display:flex; gap:8px; margin-bottom:14px;">
+        <button type="button" id="mode-generate" class="mode-tab mode-tab-active">✨ 文字生成</button>
+        <button type="button" id="mode-edit" class="mode-tab">🖼 图片编辑</button>
+      </div>
+
       <form id="gen-form">
-        <label style="margin-top:12px;">Prompt</label>
+        <label style="margin-top:4px;">Prompt</label>
         <textarea id="prompt" placeholder="Describe the image..." required>A photograph of a red fox in an autumn forest</textarea>
+
+        <div id="edit-inputs" style="display:none;">
+          <label>原图（必选，PNG / JPEG / WEBP，&lt; 4MB）</label>
+          <input type="file" id="edit_image" accept="image/png,image/jpeg,image/webp" style="padding:6px 10px;">
+          <label>蒙版（可选，透明区域表示允许修改）</label>
+          <input type="file" id="edit_mask" accept="image/png" style="padding:6px 10px;">
+        </div>
 
         <div class="row3">
           <div>
@@ -122,12 +139,12 @@
 
         <div class="row2">
           <div>
-            <label>n（张数 1-8）</label>
+            <label>n（张数 1-<span id="n-max-label">8</span>）</label>
             <input id="n_images" type="number" min="1" max="8" value="1">
           </div>
         </div>
 
-        <button class="btn" id="gen-btn" type="submit">🚀 开始生成</button>
+        <button class="btn" id="gen-btn" type="submit">✨ 开始生成</button>
       </form>
     </div>
 
@@ -180,6 +197,36 @@
   const detailMeta = document.getElementById('detail-meta');
   const detailPrompt = document.getElementById('detail-prompt');
   const detailGallery = document.getElementById('detail-gallery');
+  const modeGenerateBtn = document.getElementById('mode-generate');
+  const modeEditBtn = document.getElementById('mode-edit');
+  const editInputs = document.getElementById('edit-inputs');
+  const editImageInput = document.getElementById('edit_image');
+  const editMaskInput = document.getElementById('edit_mask');
+  const nMaxLabel = document.getElementById('n-max-label');
+  const nImagesInput = document.getElementById('n_images');
+
+  let currentMode = 'generate'; // 'generate' | 'edit'
+
+  modeGenerateBtn.addEventListener('click', () => {
+    currentMode = 'generate';
+    modeGenerateBtn.classList.add('mode-tab-active');
+    modeEditBtn.classList.remove('mode-tab-active');
+    editInputs.style.display = 'none';
+    nMaxLabel.textContent = '8';
+    nImagesInput.max = '8';
+    genBtn.textContent = '✨ 开始生成';
+  });
+
+  modeEditBtn.addEventListener('click', () => {
+    currentMode = 'edit';
+    modeEditBtn.classList.add('mode-tab-active');
+    modeGenerateBtn.classList.remove('mode-tab-active');
+    editInputs.style.display = 'block';
+    nMaxLabel.textContent = '4';
+    nImagesInput.max = '4';
+    if (parseInt(nImagesInput.value) > 4) nImagesInput.value = '4';
+    genBtn.textContent = '🖼 开始编辑';
+  });
 
   function formatTime(isoTime) {
     if (!isoTime) return '-';
@@ -278,12 +325,13 @@
   }
 
   async function apiRequest(path, options = {}) {
-    const requestOptions = { ...options };
-    requestOptions.headers = { ...(options.headers || {}) };
+    const { _skipContentType, ...fetchOptions } = options;
+    const requestOptions = { ...fetchOptions };
+    requestOptions.headers = { ...(fetchOptions.headers || {}) };
     if (state.password) {
       requestOptions.headers['x-ui-password'] = state.password;
     }
-    if (requestOptions.body !== undefined && !requestOptions.headers['Content-Type']) {
+    if (!_skipContentType && requestOptions.body !== undefined && !requestOptions.headers['Content-Type']) {
       requestOptions.headers['Content-Type'] = 'application/json';
     }
 
@@ -333,7 +381,7 @@
 
       const meta = document.createElement('div');
       meta.className = 'summary-meta';
-      meta.textContent = `${formatTime(record.createdAt)} · ${record.count || 0} 张 · ${record.size || '-'} · ${record.quality || '-'} · ${record.format || '-'}`;
+      meta.textContent = `${formatTime(record.createdAt)} · ${record.count || 0} 张 · ${record.size || '-'} · ${record.quality || '-'} · ${record.format || '-'}${record.mode === 'edit' ? ' · 编辑' : ''}`;
 
       top.appendChild(title);
       top.appendChild(badge);
@@ -525,24 +573,26 @@
       return;
     }
 
-    const payload = {
-      password: state.password,
-      prompt: document.getElementById('prompt').value,
-      size: document.getElementById('size').value,
-      quality: document.getElementById('quality').value,
-      format: document.getElementById('format').value,
-      n: parseInt(document.getElementById('n_images').value, 10)
-    };
+    const prompt = document.getElementById('prompt').value;
+    const size = document.getElementById('size').value;
+    const quality = document.getElementById('quality').value;
+    const format = document.getElementById('format').value;
+    const n = parseInt(document.getElementById('n_images').value, 10);
+
+    if (currentMode === 'edit' && !editImageInput.files[0]) {
+      alert('图片编辑模式需要上传原图。');
+      return;
+    }
+
     const optimisticId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const optimisticRecord = {
       id: optimisticId,
       createdAt: new Date().toISOString(),
-      promptPreview: toPromptPreview(payload.prompt),
-      size: payload.size,
-      quality: payload.quality,
-      format: payload.format,
+      promptPreview: toPromptPreview(prompt),
+      size, quality, format,
+      mode: currentMode,
       status: 'processing',
-      count: payload.n,
+      count: n,
       error: null
     };
     state.records.unshift(optimisticRecord);
@@ -552,10 +602,23 @@
     updateGenButtonText();
 
     try {
-      const data = await apiRequest('/api/generate', {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      });
+      let data;
+      if (currentMode === 'edit') {
+        const fd = new FormData();
+        fd.append('prompt', prompt);
+        fd.append('size', size);
+        fd.append('quality', quality);
+        fd.append('format', format);
+        fd.append('n', String(n));
+        fd.append('image', editImageInput.files[0]);
+        if (editMaskInput.files[0]) fd.append('mask', editMaskInput.files[0]);
+        data = await apiRequest('/api/edit', { method: 'POST', body: fd, _skipContentType: true });
+      } else {
+        data = await apiRequest('/api/generate', {
+          method: 'POST',
+          body: JSON.stringify({ password: state.password, prompt, size, quality, format, n })
+        });
+      }
       const summary = data.summary || {};
       const recordId = summary.id || data.recordId || optimisticId;
       const mergedRecord = {
