@@ -217,24 +217,42 @@ export async function onRequestPost(context) {
 
     await s3.putJson(recordKey, record);
 
-    const completedRecord = await runGenerationJob({
-      s3,
-      recordKey,
-      baseRecord: record,
-      url,
-      azureApiKey: AZURE_API_KEY,
-      azurePayload,
-      outputFormat,
-      mimeType
-    });
+    // 用 waitUntil 在后台执行生成任务，立即返回 processing 状态
+    // 避免 Cloudflare Worker 请求超时（图片生成通常超过30s）
+    context.waitUntil(
+      runGenerationJob({
+        s3,
+        recordKey,
+        baseRecord: record,
+        url,
+        azureApiKey: AZURE_API_KEY,
+        azurePayload,
+        outputFormat,
+        mimeType
+      }).catch(async (error) => {
+        try {
+          const failedRecord = {
+            ...record,
+            status: "failed",
+            failedAt: new Date().toISOString(),
+            count: 0,
+            imageKeys: [],
+            error: error?.message || String(error)
+          };
+          await s3.putJson(recordKey, failedRecord);
+        } catch {
+          // 忽略二次写失败
+        }
+      })
+    );
 
     return jsonResponse({
       ok: true,
       recordId,
-      summary: summarizeRecord(completedRecord)
+      summary: summarizeRecord(record)
     });
   } catch (error) {
-    // 若任务已入队(写了processing记录)但后续失败，尽量回写失败状态，避免长时间停在processing
+    // 若任务已入队(写了processing记录)但后续失败，尽量回写失败状态
     try {
       if (persistedRecord && persistedRecordKey) {
         const failedRecord = {
