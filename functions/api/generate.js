@@ -44,99 +44,6 @@ function toPromptPreview(prompt) {
   return `${trimmed.slice(0, 80)}...`;
 }
 
-function normalizeStatus(status) {
-  if (status === "processing" || status === "completed" || status === "failed") {
-    return status;
-  }
-  return "completed";
-}
-
-function summarizeRecord(record) {
-  const status = normalizeStatus(record.status);
-  return {
-    id: record.id,
-    createdAt: record.createdAt,
-    promptPreview: record.promptPreview || toPromptPreview(record.prompt || ""),
-    size: record.size,
-    quality: record.quality,
-    format: record.format,
-    status,
-    count:
-      typeof record.count === "number"
-        ? record.count
-        : typeof record.requestedCount === "number"
-          ? record.requestedCount
-          : Array.isArray(record.imageKeys)
-            ? record.imageKeys.length
-            : 0,
-    error: record.error || null
-  };
-}
-
-async function runGenerationJob({
-  s3,
-  recordKey,
-  baseRecord,
-  url,
-  azureApiKey,
-  azurePayload,
-  outputFormat,
-  mimeType
-}) {
-  const azureResponse = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "api-key": azureApiKey
-    },
-    body: JSON.stringify(azurePayload)
-  });
-
-  let data = {};
-  try {
-    data = await azureResponse.json();
-  } catch {
-    data = {};
-  }
-
-  if (!azureResponse.ok) {
-    throw new Error(data.error?.message || "Azure API 调用失败");
-  }
-
-  const rawImages = Array.isArray(data.data)
-    ? data.data
-        .map((item) => item?.b64_json)
-        .filter((img) => typeof img === "string" && img.length > 0)
-    : [];
-
-  if (!rawImages.length) {
-    throw new Error("Azure 返回里没有 b64_json 图片数据");
-  }
-
-  const dayPrefix = baseRecord.createdAt.slice(0, 10);
-  const imageKeys = new Array(rawImages.length);
-
-  await Promise.all(
-    rawImages.map(async (imageBase64, idx) => {
-      const imageKey = `images/${dayPrefix}/${baseRecord.id}_${idx + 1}.${outputFormat}`;
-      imageKeys[idx] = imageKey;
-      await s3.putBytes(imageKey, base64ToUint8Array(imageBase64), mimeType);
-    })
-  );
-
-  const completedRecord = {
-    ...baseRecord,
-    status: "completed",
-    completedAt: new Date().toISOString(),
-    count: imageKeys.length,
-    imageKeys,
-    error: null
-  };
-
-  await s3.putJson(recordKey, completedRecord);
-  return completedRecord;
-}
-
 export async function onRequestPost(context) {
   let requestBody;
   try {
@@ -180,94 +87,87 @@ export async function onRequestPost(context) {
   const s3 = s3Result.client;
 
   const url = `${AZURE_ENDPOINT.replace(/\/$/, "")}/openai/deployments/${DEPLOYMENT}/images/generations?api-version=${API_VERSION}`;
-  const azurePayload = {
-    prompt,
-    size,
-    quality,
-    output_format: outputFormat,
-    n
-  };
-  let persistedRecord = null;
-  let persistedRecordKey = null;
 
   try {
+    const azureResponse = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": AZURE_API_KEY
+      },
+      body: JSON.stringify({ prompt, size, quality, output_format: outputFormat, n })
+    });
+
+    let data = {};
+    try {
+      data = await azureResponse.json();
+    } catch {
+      data = {};
+    }
+
+    if (!azureResponse.ok) {
+      return jsonResponse(
+        { error: data.error?.message || "Azure API 调用失败" },
+        500
+      );
+    }
+
+    const rawImages = Array.isArray(data.data)
+      ? data.data
+          .map((item) => item?.b64_json)
+          .filter((img) => typeof img === "string" && img.length > 0)
+      : [];
+
+    if (!rawImages.length) {
+      return jsonResponse({ error: "Azure 返回里没有 b64_json 图片数据" }, 500);
+    }
+
     const createdAt = new Date().toISOString();
     const recordId = `${createdAt.replace(/[-:.TZ]/g, "")}_${crypto
       .randomUUID()
       .slice(0, 8)}`;
+    const dayPrefix = createdAt.slice(0, 10);
     const mimeType = getMimeType(outputFormat);
-    const recordKey = `records/${recordId}.json`;
+    const imageKeys = new Array(rawImages.length);
+
+    await Promise.all(
+      rawImages.map(async (imageBase64, idx) => {
+        const imageKey = `images/${dayPrefix}/${recordId}_${idx + 1}.${outputFormat}`;
+        imageKeys[idx] = imageKey;
+        await s3.putBytes(imageKey, base64ToUint8Array(imageBase64), mimeType);
+      })
+    );
+
     const record = {
       id: recordId,
       createdAt,
-      queuedAt: createdAt,
       prompt,
       promptPreview: toPromptPreview(prompt),
       size,
       quality,
       format: outputFormat,
-      status: "processing",
-      requestedCount: n,
-      count: n,
-      imageKeys: [],
-      error: null
+      status: "completed",
+      count: imageKeys.length,
+      imageKeys
     };
-    persistedRecord = record;
-    persistedRecordKey = recordKey;
 
-    await s3.putJson(recordKey, record);
-
-    // 用 waitUntil 在后台执行生成任务，立即返回 processing 状态
-    // 避免 Cloudflare Worker 请求超时（图片生成通常超过30s）
-    context.waitUntil(
-      runGenerationJob({
-        s3,
-        recordKey,
-        baseRecord: record,
-        url,
-        azureApiKey: AZURE_API_KEY,
-        azurePayload,
-        outputFormat,
-        mimeType
-      }).catch(async (error) => {
-        try {
-          const failedRecord = {
-            ...record,
-            status: "failed",
-            failedAt: new Date().toISOString(),
-            count: 0,
-            imageKeys: [],
-            error: error?.message || String(error)
-          };
-          await s3.putJson(recordKey, failedRecord);
-        } catch {
-          // 忽略二次写失败
-        }
-      })
-    );
+    await s3.putJson(`records/${recordId}.json`, record);
 
     return jsonResponse({
       ok: true,
       recordId,
-      summary: summarizeRecord(record)
+      summary: {
+        id: record.id,
+        createdAt: record.createdAt,
+        promptPreview: record.promptPreview,
+        size: record.size,
+        quality: record.quality,
+        format: record.format,
+        status: "completed",
+        count: record.count
+      }
     });
   } catch (error) {
-    // 若任务已入队(写了processing记录)但后续失败，尽量回写失败状态
-    try {
-      if (persistedRecord && persistedRecordKey) {
-        const failedRecord = {
-          ...persistedRecord,
-          status: "failed",
-          failedAt: new Date().toISOString(),
-          count: 0,
-          imageKeys: [],
-          error: error?.message || String(error)
-        };
-        await s3.putJson(persistedRecordKey, failedRecord);
-      }
-    } catch {
-      // 忽略二次写失败，优先返回原始错误
-    }
     return jsonResponse(
       { error: "服务器内部错误", details: error.message || String(error) },
       500
