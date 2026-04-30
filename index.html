@@ -254,6 +254,57 @@
     return 'status-completed';
   }
 
+  function normalizeImageFormat(format, fallback = 'png') {
+    const preferred = String(format || '').toLowerCase();
+    if (['png', 'jpeg', 'webp'].includes(preferred)) return preferred;
+    const fallbackNormalized = String(fallback || '').toLowerCase();
+    if (['png', 'jpeg', 'webp'].includes(fallbackNormalized)) return fallbackNormalized;
+    return 'png';
+  }
+
+  function buildImageApiUrlFromKey(key) {
+    const cleanedKey = String(key || '').trim();
+    if (!cleanedKey || !state.password) return '';
+    return `/api/image?key=${encodeURIComponent(cleanedKey)}&password=${encodeURIComponent(state.password)}`;
+  }
+
+  function toSafeImageUrl(urlValue) {
+    const raw = String(urlValue || '').trim();
+    if (!raw) return '';
+
+    if (raw.startsWith('data:image/')) return raw;
+    if (raw.startsWith('/')) return raw;
+
+    try {
+      const parsed = new URL(raw, window.location.origin);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return parsed.href;
+      }
+    } catch {
+      // ignore invalid url
+    }
+    return '';
+  }
+
+  function resolveImageSrc(image, fallbackFormat) {
+    if (!image || typeof image !== 'object') return '';
+
+    const directUrlFields = ['url', 'imageUrl', 'src', 'link', 'href'];
+    for (const field of directUrlFields) {
+      const safeUrl = toSafeImageUrl(image[field]);
+      if (safeUrl) return safeUrl;
+    }
+
+    const keyUrl = buildImageApiUrlFromKey(image.key);
+    if (keyUrl) return keyUrl;
+
+    const b64 = typeof image.b64 === 'string' ? image.b64.trim() : '';
+    if (!b64) return '';
+
+    const format = normalizeImageFormat(image.format, fallbackFormat);
+    return `data:image/${format};base64,${b64}`;
+  }
+
   function toPromptPreview(prompt) {
     const cleaned = String(prompt || '').trim().replace(/\s+/g, ' ');
     if (cleaned.length <= 80) return cleaned;
@@ -439,15 +490,17 @@
       return;
     }
 
+    let renderedImageCount = 0;
     images.forEach((image, idx) => {
-      const format = ['png', 'jpeg', 'webp'].includes(image.format) ? image.format : 'png';
-      const dataUrl = `data:image/${format};base64,${image.b64}`;
+      const format = normalizeImageFormat(image.format, record.format);
+      const imageSrc = resolveImageSrc(image, format);
+      if (!imageSrc) return;
 
       const card = document.createElement('div');
       card.className = 'imgcard';
 
       const img = document.createElement('img');
-      img.src = dataUrl;
+      img.src = imageSrc;
       img.alt = `generated-${idx + 1}`;
 
       const meta = document.createElement('div');
@@ -457,9 +510,16 @@
       label.textContent = `Result ${idx + 1}`;
 
       const link = document.createElement('a');
-      link.href = dataUrl;
-      link.download = `${record.id}_${idx + 1}.${format}`;
-      link.textContent = '下载';
+      link.href = imageSrc;
+      const canDownload = imageSrc.startsWith('data:') || imageSrc.startsWith('/api/image?');
+      if (canDownload) {
+        link.download = `${record.id}_${idx + 1}.${format}`;
+        link.textContent = '下载';
+      } else {
+        link.textContent = '打开';
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+      }
       link.style.color = '#bcd0ff';
 
       meta.appendChild(label);
@@ -467,7 +527,15 @@
       card.appendChild(img);
       card.appendChild(meta);
       detailGallery.appendChild(card);
+      renderedImageCount += 1;
     });
+
+    if (!renderedImageCount) {
+      const noImage = document.createElement('div');
+      noImage.className = 'muted';
+      noImage.textContent = '这条记录的图片链接不可用。';
+      detailGallery.appendChild(noImage);
+    }
   }
 
   async function loadHistory(options = {}) {
@@ -494,7 +562,7 @@
     clearDetail('详细信息加载中...');
 
     try {
-      const data = await apiRequest(`/api/history?id=${encodeURIComponent(recordId)}&includeImages=1`);
+      const data = await apiRequest(`/api/history?id=${encodeURIComponent(recordId)}&includeImages=1&includeImageData=0`);
       if (!data.record) {
         clearDetail('未找到详细信息。');
         return;

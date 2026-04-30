@@ -95,6 +95,7 @@ export async function onRequestGet(context) {
 
   const id = (url.searchParams.get("id") || "").trim();
   const includeImages = url.searchParams.get("includeImages") === "1";
+  const includeImageData = url.searchParams.get("includeImageData") === "1";
 
   if (id) {
     const record = await readRecord(s3, `records/${id}.json`);
@@ -118,13 +119,16 @@ export async function onRequestGet(context) {
 
     if (status === "completed") {
       for (const key of imageKeys) {
-        const buffer = await s3.getBytes(key);
-        if (!buffer) continue;
-        images.push({
+        const image = {
           key,
-          format: imageFormatFromKey(key, record.format),
-          b64: arrayBufferToBase64(buffer)
-        });
+          format: imageFormatFromKey(key, record.format)
+        };
+        if (includeImageData) {
+          const buffer = await s3.getBytes(key);
+          if (!buffer) continue;
+          image.b64 = arrayBufferToBase64(buffer);
+        }
+        images.push(image);
       }
     }
 
